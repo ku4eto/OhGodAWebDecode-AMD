@@ -1,0 +1,952 @@
+<head>
+	<style>
+		body, input[type="text"]
+		{
+			background-color: lightgray;
+			text-align: center;
+		}
+		th
+		{
+			border: 1px solid black;
+			text-align: center;
+			padding: 2px;
+		}
+		td
+		{
+			border-left: 1px solid black;
+			border-right: 1px solid black;
+			padding: 0px;
+			margin: 0px;
+		}
+		#mainTable
+		{
+			display: table;
+			margin-right: auto;
+			margin-left: auto;
+			border: 1px solid black;
+			text-align: center;
+			border-collapse: collapse;
+		}
+		#strapCount
+		{
+			text-align: center;
+		}
+		.viewField
+		{
+			margin: 2px;
+		}
+		.regInput
+		{
+			text-align: center;
+			min-width: 2em;
+		}
+		.strapName
+		{
+			width: 10em;
+		}
+		.strapInput
+		{
+			width: 88em;
+		}
+		.fieldError
+		{
+			border: 2px solid red !important;
+		}
+		.fieldWarning
+		{
+			border: 2px solid purple;
+		}
+	</style>
+	<script src="hexdec.js"></script>
+</head>
+<body>
+
+</body>
+<script>
+const Struct = (...keys) => ((...v) => keys.reduce((o, k, i) => {o[k] = v[i]; return o} , {}));
+
+function buf2hex(buf)
+{
+  return Array.prototype.map.call(new Uint8Array(buf), x => ('00' + x.toString(16)).slice(-2)).join('');
+}
+
+function hex2buf(str)
+{
+	//if (str.length % 2 != 0)
+	//	throw new Error("This can't be a byte-aligned value");
+
+	if (str.substring(0, 2) === '0x')
+		str = str.substring(2);
+
+	if (str.length % 2 != 0)
+		str = "0" + str;
+
+	var buf = new ArrayBuffer(str.length / 2);
+	var bufView = new Uint8Array(buf);
+	for (var i = 0; i < str.length; i++)
+		bufView[i] = parseInt(str.substr(i * 2, 2), 16);
+
+	return buf;
+}
+
+class BitWizard
+{
+	constructor(buf)
+	{
+		this.buf = buf;
+		this.bufView = new Uint8Array(this.buf);
+		this.pos = 0; // Position in bits
+	}
+
+	// TODO: Warning, this method does not automatically grow the buffer!
+	encode(buf, bitSize)
+	{
+		var bufView = new Uint8Array(buf);
+		var bufPos = 0;
+
+		while (bufPos < bitSize)
+		{
+			var roundSize = (bitSize - bufPos);
+
+			if (roundSize > (8 - bufPos % 8))
+				roundSize = (8 - bufPos % 8);
+
+			if (roundSize > (8 - this.pos % 8))
+				roundSize = (8 - this.pos % 8);
+
+			var roundMask = ((1 << roundSize) - 1);
+
+			this.bufView[this.pos / 8 | 0] = (this.bufView[this.pos / 8 | 0] & ~(roundMask << (this.pos % 8))) | (((bufView[bufPos / 8 | 0] & (roundMask << (bufPos % 8))) >> (bufPos % 8)) << (this.pos % 8));
+
+			this.pos += roundSize;
+			bufPos += roundSize;
+		}
+	}
+
+	decode(bitSize)
+	{
+		var buf = new ArrayBuffer((bitSize + 7) / 8 | 0);
+		var bufView = new Uint8Array(buf);
+		var bufPos = 0;
+
+		while (bufPos < bitSize)
+		{
+			if (this.pos >= this.buf.byteLength * 8)
+				throw new Error("Decode didn't end within the bounds of the buffer");
+
+			var roundSize = (bitSize - bufPos);
+
+			if (roundSize > (8 - bufPos % 8))
+				roundSize = (8 - bufPos % 8);
+
+			if (roundSize > (8 - this.pos % 8))
+				roundSize = (8 - this.pos % 8);
+
+			var roundMask = ((1 << roundSize) - 1);
+
+			bufView[bufPos / 8 | 0] = (bufView[bufPos / 8 | 0] & ~(roundMask << (bufPos % 8))) | (((this.bufView[this.pos / 8 | 0] & (roundMask << (this.pos % 8))) >> (this.pos % 8)) << (bufPos % 8));
+
+			this.pos += roundSize;
+			bufPos += roundSize;
+		}
+
+		return buf;
+	}
+
+	skip(bitSize)
+	{
+		this.pos += bitSize;
+	}
+
+	resetPos()
+	{
+		this.pos = 0;
+	}
+
+	resize(bitSize)
+	{
+		var newBuf = new ArrayBuffer(bitSize * 8);
+
+		this.bufView = new Uint8Array(newBuf);
+		this.bufView.set(this.buf);
+
+		this.buf = newBuf;
+	}
+
+	get size()
+	{
+		return this.buf.byteLength * 8;	
+	}
+
+	get remainingBits()
+	{
+		return this.buf.byteLength * 8 - this.pos;
+	}
+
+	// Bit Scan Reverse
+	get bsr()
+	{
+		var bitSize = this.buf.byteLength * 8;
+
+		for (var i = 0; i < bitSize * 8; ++i)
+			if ((this.bufView[(bitSize - i - 1) / 8 | 0] & (1 << ((bitSize - i - 1) % 8))) != 0)
+				return (bitSize - i - 1);
+	}
+}
+
+const Register  = Struct('name', 'size');
+const Category  = Struct('name', 'members');
+const ViewField = Struct('name', 'members');
+const BitField  = Struct('name', 'end', 'begin');
+const Preset    = Struct('name', 'data', 'view');
+
+var amdPolarisData =
+[
+	Register('WR_CTL_D1',    32),
+	Register('WR_CTL_2',     32),
+	Register('PMG_TIMING',   32),
+	Register('RAS_TIMING',   32),
+	Register('CAS_TIMING',   32),
+	Register('MISC_TIMING',  32),
+	Register('MISC_TIMING2', 32),
+	Register('MISC1',        32),
+	Register('MISC3',        32),
+	Register('MISC8',        32),
+	Register('ARB1',         32),
+	Register('ARB2',         32),
+];
+
+var amdPolarisView =
+[
+	Category('WR_CTL_D1', 
+	[
+		ViewField('DAT_DLY',    [BitField('WR_CTL_D1',  3,  0)]),
+		ViewField('DQS_DLY',    [BitField('WR_CTL_D1',  7,  4)]),
+		ViewField('DQS_XTR',    [BitField('WR_CTL_D1',  8,  8)]),
+		ViewField('DAT_2Y_DLY', [BitField('WR_CTL_D1',  9,  9)]),
+		ViewField('ADR_2Y_DLY', [BitField('WR_CTL_D1', 10, 10)]),
+		ViewField('CMD_2Y_DLY', [BitField('WR_CTL_D1', 11, 11)]),
+		ViewField('OEN_DLY',    [BitField('WR_CTL_D1', 15, 12)]),
+		ViewField('OEN_EXT',    [BitField('WR_CTL_D1', 19, 16)]),
+		ViewField('OEN_SEL',    [BitField('WR_CTL_D1', 21, 20)]),
+		ViewField('ODT_DLY',    [BitField('WR_CTL_D1', 27, 24)]),
+		ViewField('ODT_EXT',    [BitField('WR_CTL_D1', 28, 28)]),
+		ViewField('ADR_DLY',    [BitField('WR_CTL_D1', 29, 29)]),
+		ViewField('CMD_DLY',    [BitField('WR_CTL_D1', 30, 30)]),
+
+	]),
+	Category('WR_CTL_2', 
+	[
+		ViewField('DAT_DLY_H_D0',  [BitField('WR_CTL_2', 0, 0)]),
+		ViewField('DQS_DLY_H_D0',  [BitField('WR_CTL_2', 1, 1)]),
+		ViewField('OEN_DLY_H_D0',  [BitField('WR_CTL_2', 2, 2)]),
+		ViewField('DAT_DLY_H_D1',  [BitField('WR_CTL_2', 3, 3)]),
+		ViewField('DQS_DLY_H_D1',  [BitField('WR_CTL_2', 4, 4)]),
+		ViewField('OEN_DLY_H_D1',  [BitField('WR_CTL_2', 5, 5)]),
+		ViewField('WCDR_EN',       [BitField('WR_CTL_2', 6, 6)]),
+	]),
+	Category('PMG_TIMING', 
+	[
+		ViewField('TCKSRE',         [BitField('PMG_TIMING',  2,  0)]),
+		ViewField('TCKSRX',         [BitField('PMG_TIMING',  6,  4)]),
+		ViewField('TCKE_PULSE',     [BitField('PMG_TIMING', 11,  8), BitField('PMG_TIMING', 23, 23)]),
+		ViewField('TCKE',           [BitField('PMG_TIMING', 17, 12)]),
+		ViewField('SEQ_IDLE',       [BitField('PMG_TIMING', 20, 18)]),
+		ViewField('SEQ_IDLE_SS',    [BitField('PMG_TIMING', 31, 24)]),
+	]),
+	Category('RAS_TIMING', 
+	[
+		ViewField('TRCDW',  [BitField('RAS_TIMING',  4,  0), BitField('RAS_TIMING',  31, 31)]),
+		ViewField('TRCDWA', [BitField('RAS_TIMING',  9,  5), BitField('MISC_TIMING', 29, 29)]),
+		ViewField('TRCDR',  [BitField('RAS_TIMING', 14, 10), BitField('MISC_TIMING', 30, 30)]),
+		ViewField('TRCDRA', [BitField('RAS_TIMING', 19, 15), BitField('MISC_TIMING', 31, 31)]),
+		ViewField('TRRD',   [BitField('RAS_TIMING', 23, 20)]),
+		ViewField('TRC',    [BitField('RAS_TIMING', 30, 24)]),
+	]),
+	Category('CAS_TIMING', 
+	[
+		ViewField('TNOPW', [BitField('CAS_TIMING',  1,  0)]),
+		ViewField('TNOPR', [BitField('CAS_TIMING',  3,  2)]),
+		ViewField('TR2W',  [BitField('CAS_TIMING',  8,  4)]),
+		ViewField('TCCDL', [BitField('CAS_TIMING', 11,  9)]),
+		ViewField('TR2R',  [BitField('CAS_TIMING', 15, 12)]),
+		ViewField('TW2R',  [BitField('CAS_TIMING', 20, 16)]),
+		ViewField('TCL',   [BitField('CAS_TIMING', 28, 24)]),
+	]),
+	Category('MISC_TIMING', 
+	[
+		ViewField('TRP_WRA (!)',  [BitField('MISC_TIMING',  7,  0)]),
+		ViewField('TRP_RDA',      [BitField('MISC_TIMING', 13,  8)]),
+		ViewField('TRP',          [BitField('MISC_TIMING', 19, 16)]),
+		ViewField('TRFC',         [BitField('MISC_TIMING', 28, 20)]),
+		//ViewField('TRCDWA (MSB)', [BitField('MISC_TIMING', 29, 29)]),
+		//ViewField('TRCDR (MSB)',  [BitField('MISC_TIMING', 30, 30)]),
+		//ViewField('TRCDRA (MSB)', [BitField('MISC_TIMING', 31, 31)]),
+	]),
+	Category('MISC_TIMING2', 
+	[
+		ViewField('PA2RDATA', [BitField('MISC_TIMING2',  2,  0)]),
+		ViewField('PA2WDATA', [BitField('MISC_TIMING2',  6,  4)]),
+		ViewField('FAW',      [BitField('MISC_TIMING2', 12,  8)]),
+		ViewField('TREDC',    [BitField('MISC_TIMING2', 15, 13)]),
+		ViewField('TWEDC',    [BitField('MISC_TIMING2', 20, 16)]),
+		ViewField('T32AW',    [BitField('MISC_TIMING2', 24, 21)]),
+		ViewField('TWDATATR', [BitField('MISC_TIMING2', 31, 28)]),
+	]),
+	Category('ARB1', 
+	[
+		ViewField('ACTRD',     [BitField('ARB1',  7,  0)]),
+		ViewField('ACTWR',     [BitField('ARB1', 15,  8)]),
+		ViewField('RASMACTRD', [BitField('ARB1', 23, 16)]),
+		ViewField('RASMACTWR', [BitField('ARB1', 31, 24)]),
+	]),
+	Category('ARB2', 
+	[
+		ViewField('RAS2RAS',  [BitField('ARB2',  7,  0)]),
+		ViewField('RP',       [BitField('ARB2', 15,  8)]),
+		ViewField('WRPLUSRP', [BitField('ARB2', 23, 16)]),
+		ViewField('BUS_TURN', [BitField('ARB2', 28, 24)]),
+	]),
+];
+
+var amdPolarisGDDR5View =
+[
+	Category('MR0', 
+	[
+		ViewField('WLmrs',               [BitField('MISC1', 0*16 +  2,  0 + 0*16)]),
+		ViewField('CLmrs',               [BitField('MISC1', 0*16 +  6,  3 + 0*16), BitField('MISC8', 0, 0)]),
+		ViewField('TM',                  [BitField('MISC1', 0*16 +  7,  7 + 0*16)]),
+		ViewField('WR',                  [BitField('MISC1', 0*16 + 11,  8 + 0*16), BitField('MISC8', 1, 1)]),
+		ViewField('BA0',                 [BitField('MISC1', 0*16 + 12, 12 + 0*16)]),
+		ViewField('BA1',                 [BitField('MISC1', 0*16 + 13, 13 + 0*16)]),
+		ViewField('BA2',                 [BitField('MISC1', 0*16 + 14, 14 + 0*16)]),
+		ViewField('BA3',                 [BitField('MISC1', 0*16 + 15, 15 + 0*16)]),
+	]),
+	Category('MR1',
+	[
+		ViewField('Driver Strength',     [BitField('MISC1', 1*16 +  1,  0 + 1*16)]),
+		ViewField('Data Termination',    [BitField('MISC1', 1*16 +  3,  2 + 1*16)]),
+		ViewField('ADD/CMD Termination', [BitField('MISC1', 1*16 +  5,  4 + 1*16)]),
+		ViewField('Cal Upd',             [BitField('MISC1', 1*16 +  6,  6 + 1*16)]),
+		ViewField('PLL DLL',             [BitField('MISC1', 1*16 +  7,  7 + 1*16)]),
+		ViewField('RDBI',                [BitField('MISC1', 1*16 +  8,  8 + 1*16)]),
+		ViewField('WDBI',                [BitField('MISC1', 1*16 +  9,  9 + 1*16)]),
+		ViewField('ABI',                 [BitField('MISC1', 1*16 + 10, 10 + 1*16)]),
+		ViewField('PLL Reset',           [BitField('MISC1', 1*16 + 11, 11 + 1*16)]),
+		ViewField('BA0',                 [BitField('MISC1', 1*16 + 12, 12 + 1*16)]),
+		ViewField('BA1',                 [BitField('MISC1', 1*16 + 13, 13 + 1*16)]),
+		ViewField('BA2',                 [BitField('MISC1', 1*16 + 14, 14 + 1*16)]),
+		ViewField('BA3',                 [BitField('MISC1', 1*16 + 15, 15 + 1*16)]),
+	]),
+	Category('MR4', 
+	[
+		ViewField('EDC Hold Pattern',  [BitField('MISC3', 0*16 +  3,  0 + 0*16)]),
+		ViewField('CRCWL',             [BitField('MISC3', 0*16 +  6,  4 + 0*16)]),
+		ViewField('CRCRL',             [BitField('MISC3', 0*16 +  8,  7 + 0*16)]),
+		ViewField('RD CRC',            [BitField('MISC3', 0*16 +  9,  9 + 0*16)]),
+		ViewField('WR CRC',            [BitField('MISC3', 0*16 + 10, 10 + 0*16)]),
+		ViewField('EDC13Inv',          [BitField('MISC3', 0*16 + 11, 11 + 0*16)]),
+		ViewField('BA0',               [BitField('MISC3', 0*16 + 12, 12 + 0*16)]),
+		ViewField('BA1',               [BitField('MISC3', 0*16 + 13, 13 + 0*16)]),
+		ViewField('BA2',               [BitField('MISC3', 0*16 + 14, 14 + 0*16)]),
+		ViewField('BA3',               [BitField('MISC3', 0*16 + 15, 15 + 0*16)]),
+	]),
+	Category('MR5',
+	[
+		ViewField('LP1',               [BitField('MISC3', 1*16 +  0,  0 + 1*16)]),
+		ViewField('LP2',               [BitField('MISC3', 1*16 +  1,  1 + 1*16)]),
+		ViewField('LP3',               [BitField('MISC3', 1*16 +  2,  2 + 1*16)]),
+		ViewField('PLL/DLL Bandwidth', [BitField('MISC3', 1*16 +  5,  3 + 1*16)]),
+		ViewField('RAS',               [BitField('MISC3', 1*16 + 11,  6 + 1*16)]),
+		ViewField('BA0',               [BitField('MISC3', 1*16 + 12, 12 + 1*16)]),
+		ViewField('BA1',               [BitField('MISC3', 1*16 + 13, 13 + 1*16)]),
+		ViewField('BA2',               [BitField('MISC3', 1*16 + 14, 14 + 1*16)]),
+		ViewField('BA3',               [BitField('MISC3', 1*16 + 15, 15 + 1*16)]),
+
+	]),
+	Category('MR8', 
+	[
+		//ViewField('CL_EHF',   [BitField('MISC8',  0,  0)]),
+		//ViewField('WR_EHF',   [BitField('MISC8',  1,  1)]),
+		ViewField('EDC Hi-Z', [BitField('MISC8',  2,  2)]),
+		ViewField('REF PB',   [BitField('MISC8',  3,  3)]),
+		//ViewField('RFU',      [BitField('MISC8', 11,  4)]),
+		ViewField('BA0',      [BitField('MISC8', 12, 12)]),
+		ViewField('BA1',      [BitField('MISC8', 13, 13)]),
+		ViewField('BA2',      [BitField('MISC8', 14, 14)]),
+		ViewField('BA3',      [BitField('MISC8', 15, 15)]),
+	]),
+];
+
+var singleMRData =
+[
+	Register('DATA', 16),
+];
+
+var gddr5MR2View =
+[
+	Category('DATA', 
+	[
+		ViewField('OCD Pulldown Driver Offset',      [BitField('DATA',  2,  0)]),
+		ViewField('OCD Pullup Driver Offset',        [BitField('DATA',  5,  3)]),
+		ViewField('Data and WCK Termination Offset', [BitField('DATA',  8,  6)]),
+		ViewField('ADD/CMD Termination Offset',      [BitField('DATA', 11,  9)]),
+		ViewField('BA0',   	                         [BitField('DATA', 12, 12)]),
+		ViewField('BA1',   	                         [BitField('DATA', 13, 13)]),
+		ViewField('BA2',   	                         [BitField('DATA', 14, 14)]),
+		ViewField('BA3',   	                         [BitField('DATA', 15, 15)]),
+	]),
+];
+
+var gddr5MR3View =
+[
+	Category('DATA', 
+	[
+		ViewField('Self Refresh',    [BitField('DATA',  1,  0)]),
+		ViewField('WCK01Inv',        [BitField('DATA',  2,  2)]),
+		ViewField('WCK23Inv',        [BitField('DATA',  3,  3)]),
+		ViewField('WCK2CK',          [BitField('DATA',  4,  4)]),
+		ViewField('RDQS Mode',       [BitField('DATA',  5,  5)]),
+		ViewField('Info',            [BitField('DATA',  7,  6)]),
+		ViewField('WCK Termination', [BitField('DATA',  9,  8)]),
+		ViewField('Bank Groups',     [BitField('DATA', 11, 10)]),
+		ViewField('BA0',   	         [BitField('DATA', 12, 12)]),
+		ViewField('BA1',   	         [BitField('DATA', 13, 13)]),
+		ViewField('BA2',   	         [BitField('DATA', 14, 14)]),
+		ViewField('BA3',   	         [BitField('DATA', 15, 15)]),
+	]),
+];
+
+var presets =
+[
+	Category('AMD',
+	[
+		Preset('Polaris',          amdPolarisData, amdPolarisView),
+		Preset('Polaris + GDDR5',  amdPolarisData, amdPolarisView.concat(amdPolarisGDDR5View)),
+	]),
+	Category('GDDR5',
+	[
+		Preset('MR2', singleMRData, gddr5MR2View),
+		Preset('MR3', singleMRData, gddr5MR3View),
+	]),
+];
+
+var gStrapCount = 0;
+
+var gData;
+var gView;
+var gStrapListDiv;
+var gMainTable;
+var gDataValues = [];
+
+function encode(strapId)
+{
+	compareFields();
+
+	var strapName  = document.getElementById("strapName" + strapId);
+	var strapImpliedHex = document.getElementById("strapImpliedHex" + strapId);
+	var strapInput = document.getElementById("strapInput" + strapId);
+
+	var strapBitSize = gData.reduce((accumulator, reg) => accumulator + reg.size, 0);
+
+	if (strapBitSize % 8 != 0)
+		throw new Error("Align your crap!");
+
+	if (strapInput.value.length == 0)
+	{
+		gDataValues[strapId] = [];
+
+		// Encoding without initial input, initialize gDataValues
+		gData.forEach(function(reg, regId)
+		{
+			gDataValues[strapId][regId] = new ArrayBuffer((reg.size + 7) / 8 | 0);
+		});
+	}
+
+	// TODO: This array shouldn't have a fixed size
+	var strap = new BitWizard(new ArrayBuffer(strapBitSize / 8));
+
+	gView.forEach(function(cat, catId)
+	{
+		cat.members.forEach(function(viewField, viewFieldId)
+		{
+			var bitSize = viewField.members.reduce((accumulator, bitField) => accumulator + bitField.end - bitField.begin + 1, 0);
+			var input = document.getElementById('REG' + strapId + '|' + catId + '|' + viewFieldId);
+
+			try
+			{
+				var value = new BitWizard((new Uint8Array(hex2buf(decToHex(input.value)))).reverse());
+
+				if (value.size < bitSize)
+					value.resize(bitSize);
+
+				if (value.bsr + 1 > bitSize)
+					throw new Error("The value can't fit into its field");
+			}
+			catch (ex)
+			{
+				input.classList.add("fieldError");
+				return;
+			}
+
+			viewField.members.forEach(function(bitField, bitFieldId)
+			{
+				var regId = gData.findIndex(reg => reg.name == bitField.name)
+
+				if (regId != -1)
+				{
+					var dataValue = new BitWizard(gDataValues[strapId][regId]);
+					dataValue.skip(bitField.begin);
+					dataValue.encode(value.decode(bitField.end - bitField.begin + 1), bitField.end - bitField.begin + 1);
+					gDataValues[strapId][regId] = dataValue.buf;
+				}
+				else
+					console.error("Couldn't find the required data for BitField");
+			});
+
+			input.classList.remove("fieldError");
+		});
+	});
+
+	gData.forEach(function(reg, regId)
+	{
+		strap.encode(gDataValues[strapId][regId], reg.size);
+	});
+
+	if (strapImpliedHex.checked)
+		strapInput.value = buf2hex(strap.buf).toUpperCase();
+	else
+		strapInput.value = "0x" + buf2hex(strap.buf).toUpperCase();
+
+	if (strap.remainingBits != 0)
+		console.error("Every time you misalign a structure, a rabbit is put into an oven!");
+
+	saveStrap(strapId);
+}
+
+function decode(strapId)
+{
+	var strapName  = document.getElementById("strapName" + strapId);
+	var strapImpliedHex = document.getElementById("strapImpliedHex" + strapId);
+	var strapInput = document.getElementById("strapInput" + strapId);
+
+	strapInput.classList.remove("fieldError");
+	strapInput.classList.remove("fieldWarning");
+
+	if (strapInput.value.length == 0)
+	{
+		// Reset fields
+
+		gView.forEach(function(cat, catId)
+		{
+			cat.members.forEach(function(viewField, viewFieldId)
+			{
+				var input = document.getElementById('REG' + strapId + '|' + catId + '|' + viewFieldId);
+				input.value = "";
+			});
+		});
+
+		compareFields();
+		saveStrap(strapId);
+
+		return;
+	}
+
+	var strapBitSize = gData.reduce((accumulator, reg) => accumulator + reg.size, 0);
+
+	var strap;
+
+	try
+	{
+		// Half bytes are handled a bit weirdly, so just refuse them
+		if (strapInput.value.length % 2 != 0)
+			throw new Error("Please input an at least byte-aligned value");
+
+		if (strapInput.value.substring(0, 2) === '0x')
+		{
+			strap = new BitWizard(hex2buf(strapInput.value));
+			strapImpliedHex.checked = false;
+		}
+		else
+		{
+			strap = new BitWizard(hex2buf(strapInput.value));
+			strapImpliedHex.checked = true;
+		}
+
+		gDataValues[strapId] = [];
+
+		gData.forEach(function(reg, regId)
+		{
+			gDataValues[strapId][regId] = strap.decode(reg.size);
+		});
+	}
+	catch (ex)
+	{
+		strapInput.classList.add("fieldError");
+		return;
+	}
+
+	if (strap.remainingBits != 0)
+	{
+		strapInput.classList.add("fieldWarning");
+
+		if (strapInput.value.length == strapBitSize * 2 / 8)
+		console.error("Every time you misalign a structure, a titty streamer is forced to play games!");
+	}
+
+	gView.forEach(function(cat, catId)
+	{
+		cat.members.forEach(function(viewField, viewFieldId)
+		{
+			// TODO: BitWizard should really be able to grow dynamically
+			var bitSize = viewField.members.reduce((accumulator, bitField) => accumulator + bitField.end - bitField.begin + 1, 0);
+			var viewFieldValue = new BitWizard(new ArrayBuffer((bitSize + 7) / 8 | 0));
+
+			viewField.members.forEach(function(bitField, bitFieldId)
+			{
+				var regId = gData.findIndex(reg => reg.name == bitField.name)
+
+				if (regId != -1)
+				{
+					var dataValue = new BitWizard(gDataValues[strapId][regId]);
+
+					dataValue.skip(bitField.begin);
+
+					viewFieldValue.encode(dataValue.decode(bitField.end - bitField.begin + 1), bitField.end - bitField.begin + 1);
+				}
+				else
+					console.error("Couldn't find the required data for BitField");
+			});
+
+			var value = new Uint8Array(viewFieldValue.buf);
+
+			var input = document.getElementById('REG' + strapId + '|' + catId + '|' + viewFieldId);
+			input.value = hexToDec(buf2hex(value.reverse()));
+
+			if (input.value == "")
+				input.value = "0";
+		});
+	});
+
+	compareFields();
+	saveStrap(strapId);
+}
+
+function compareFields()
+{
+	gView.forEach(function(cat, catId)
+	{
+		cat.members.forEach(function(viewField, viewFieldId)
+		{
+			var baseValue = "";
+			var mismatch = false;
+
+			for (var strapId = 0; strapId < gStrapCount; ++strapId)
+			{
+				var value = document.getElementById('REG' + strapId + '|' + catId + '|' + viewFieldId).value;
+
+				if (!baseValue.length)
+					baseValue = value;
+				else if (value.length && value != baseValue)
+					mismatch = true;
+			}
+
+			for (var strapId = 0; strapId < gStrapCount; ++strapId)
+			{
+				document.getElementById('REG' + strapId + '|' + catId + '|' + viewFieldId).classList.toggle("fieldWarning", mismatch);
+			}
+		});
+	});
+}
+
+function saveStrap(strapId)
+{
+	var strapName  = document.getElementById("strapName" + strapId);
+	var strapImpliedHex = document.getElementById("strapImpliedHex" + strapId);
+	var strapInput = document.getElementById("strapInput" + strapId);
+
+	localStorage.setItem("session_" + window.location.hash + "_" + strapId, JSON.stringify({"strapName": strapName.value, "strapImpliedHex": strapImpliedHex.checked, "strapInput": strapInput.value}));
+}
+
+function report(strapId)
+{
+	var reportArea = document.getElementById("reportArea");
+	var strapName  = document.getElementById("strapName" + strapId);
+	var strapInput = document.getElementById("strapInput" + strapId);
+
+	reportArea.style.display = "";
+	reportArea.value = "";
+
+	if (strapName.value.length != 0)
+		reportArea.value += "#NAME: " + strapName.value + "\n";
+	
+	reportArea.value += "#HEX: " + strapInput.value + "\n\n";
+
+	gView.forEach(function(cat, catId)
+	{
+		cat.members.forEach(function(field, fieldId)
+		{
+			var input = document.getElementById('REG' + strapId + '|' + catId + '|' + fieldId);
+			reportArea.value += " " + field.name + " = " + input.value + ",";
+		});
+
+		reportArea.value += "\n\n";
+	});
+}
+
+function onPresetSelect()
+{
+	var val = document.getElementById("presetSelect").value.split(",");
+	var catId = Number(val[0]);
+	var presetId = Number(val[1]);
+
+	localStorage.presetSelectName = presets[catId].members[presetId].name;
+
+	buildMainTable(catId, presetId);
+}
+
+function onStrapCountChange()
+{
+	var oldStrapCount = gStrapCount;
+	var newStrapCount = Number(document.getElementById("strapCount").value);
+
+	localStorage.strapCount = newStrapCount;
+	gStrapCount = newStrapCount;
+
+	while (newStrapCount > oldStrapCount)
+	{
+		StrapListDivAdd(oldStrapCount);
+		oldStrapCount++;
+	}
+
+	while (newStrapCount < oldStrapCount)
+	{
+		oldStrapCount--;
+		StrapListDivDel(oldStrapCount);
+	}
+
+	// Rebuild mainTable
+	// TODO: That's really not a nice way of doing it
+	onPresetSelect();
+}
+
+function fancyCreateElement(parent, elementType, elementConstructor)
+{
+	var element = document.createElement(elementType);
+	elementConstructor(element);
+	parent.appendChild(element);
+}
+
+function buildPage()
+{
+	fancyCreateElement(document.body, "div", function(div)
+	{
+		fancyCreateElement(div, "input", function(input)
+		{
+			if (isNaN(localStorage.strapCount))
+				localStorage.strapCount = 2;
+
+			input.id = "strapCount";
+			input.type = "number";
+			input.value = localStorage.strapCount;
+			input.min = 0;
+			input.size = 3;
+			input.maxLength = input.size;
+			input.style = "width: " + input.size + "em;"
+			input.onchange = onStrapCountChange;
+		});
+
+		fancyCreateElement(div, "select", function(select)
+		{
+			select.id = "presetSelect";
+
+			presets.forEach(function(cat, catId)
+			{
+				fancyCreateElement(select, "optgroup", function(optgroup)
+				{
+					optgroup.label = cat.name;
+					
+					cat.members.forEach(function(preset, presetId)
+					{
+						fancyCreateElement(optgroup, "option", function(option)
+						{
+							option.value = [catId, presetId].join(",");
+							option.innerHTML = preset.name;
+
+							if (localStorage.presetSelectName && localStorage.presetSelectName == preset.name)
+								option.selected = true;
+						});
+					});
+				});
+			});
+
+			select.onchange = onPresetSelect;
+		});
+	});
+
+	fancyCreateElement(document.body, "div", function(div)
+	{
+		div.id = "strapListDiv";
+		gStrapListDiv = div;
+	});
+
+	fancyCreateElement(document.body, "table", function(table)
+	{
+		table.id = "mainTable";
+		gMainTable = table;
+	});
+
+	buildMainTable(0, 0);
+
+	fancyCreateElement(document.body, "div", function(div)
+	{
+		fancyCreateElement(div, "textarea", function(textarea)
+		{
+			textarea.id = "reportArea";
+			textarea.style.display = "none";
+			textarea.cols = 220;
+			textarea.rows = 40;
+		});
+	});
+}
+
+function StrapListDivAdd(strapId)
+{
+	var storedString = localStorage.getItem("session_" + window.location.hash + "_" + strapId);
+	var storedItem = {"strapName": "", "strapImpliedHex": true, "strapInput": ""};
+
+	if (storedString)
+		storedItem = JSON.parse(storedString);
+
+	fancyCreateElement(gStrapListDiv, "div", function(div)
+	{
+		fancyCreateElement(div, "input", function(input)
+		{
+			input.id = "strapName" + strapId;
+			input.className = "strapName";
+			input.type = "text";
+			input.placeholder = `Strap #${strapId}`;
+			input.value = storedItem["strapName"];
+			input.oninput = saveStrap.bind(null, strapId);
+		});
+
+		fancyCreateElement(div, "input", function(input)
+		{
+			input.id = "strapImpliedHex" + strapId;
+			input.className = "strapImpliedHex";
+			input.type = "checkbox";
+			input.title = "Implied hex notation";
+			input.checked = storedItem["strapImpliedHex"];
+			input.oninput = saveStrap.bind(null, strapId);
+		});
+
+		fancyCreateElement(div, "input", function(input)
+		{
+			input.id = "strapInput" + strapId;
+			input.className = "strapInput";
+			input.type = "text";
+			input.placeholder = "Strap goes in, magic comes out. You can't explain that.";
+			input.value = storedItem["strapInput"];
+			input.oninput = decode.bind(null, strapId);
+		});
+
+		fancyCreateElement(div, "button", function(button)
+		{
+			button.className = "reportButton";
+			button.type = "button";
+			button.onclick = report.bind(null, strapId);
+			button.innerText = "Report";
+		});
+	});
+}
+
+function StrapListDivDel(strapId)
+{
+	gStrapListDiv.removeChild(gStrapListDiv.lastChild);
+}
+
+function buildMainTable(catId, presetId)
+{
+	gData = presets[catId].members[presetId].data;
+	gView = presets[catId].members[presetId].view;
+
+	while (gMainTable.firstChild)
+		gMainTable.removeChild(gMainTable.firstChild);
+
+	var rowCount = 0;
+
+	gView.forEach(function(cat)
+	{
+		if (rowCount < cat.members.length)
+			rowCount = cat.members.length;
+	});
+
+	fancyCreateElement(mainTable, "tr", function(tr)
+	{
+		gView.forEach(function(cat)
+		{
+			fancyCreateElement(tr, "th", function(th)
+			{
+				th.innerHTML = cat.name;
+			});
+		});
+	});
+
+	for (var i = 0; i < rowCount; i++)
+	{
+		fancyCreateElement(mainTable, "tr", function(tr)
+		{
+			gView.forEach(function(cat, catId)
+			{
+				fancyCreateElement(tr, "td", function(td)
+				{
+					fancyCreateElement(td, "div", function(div)
+					{
+						div.className = "viewField";
+						if (i < cat.members.length)
+						{
+							var bitSize = cat.members[i].members.reduce((accumulator, bitField) => accumulator + bitField.end - bitField.begin + 1, 0);
+
+							fancyCreateElement(div, "div", function(div)
+							{
+								div.innerHTML = cat.members[i].name;
+								div.style = "clear: left";
+							});
+
+							for (var strapId = 0; strapId < gStrapCount; ++strapId)
+							{
+								fancyCreateElement(div, "input", function(input)
+								{
+									input.id = 'REG' + strapId + '|' + catId + '|' + i;
+									input.type = "text";
+									input.className = "regInput";
+									input.oninput = encode.bind(null, strapId);
+
+									//input.size = (bitSize - 1) / (Math.log2(10) | 0) + 1;
+									input.maxLength = (bitSize - 1) / (Math.log2(10) | 0) + 1;
+									input.style = "width: " + input.maxLength + "em;"
+								});
+							}
+						}
+					});
+				});
+			});
+		});
+	}
+
+	for (var strapId = 0; strapId < gStrapCount; ++strapId)
+		decode(strapId);
+}
+
+// Initialize session
+if (!window.location.hash)
+{
+	var d = new Date();
+	window.location.hash = d.toISOString() + "_" + Math.random();
+}
+
+buildPage();
+onPresetSelect();
+onStrapCountChange();
+
+</script>
